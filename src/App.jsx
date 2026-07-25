@@ -1,14 +1,17 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Heart, X, PawPrint, Calendar, User, RotateCcw,
-  MapPin, Sparkles, Clock, Trash2, ChevronRight, MessageCircle, Navigation, LogOut
+  MapPin, Sparkles, Clock, Trash2, ChevronRight, MessageCircle, Navigation, LogOut, ClipboardList
 } from "lucide-react";
 import { loadUserData, saveUserData, deleteUserData } from "./userData.js";
 import { clearSession, loadSession } from "./storage.js";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase.js";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import AuthScreen from "./components/AuthScreen.jsx";
+import ShelterListingsScreen from "./components/ShelterListingsScreen.jsx";
 import { createChatSession, normalizeChatSessions } from "./utils/chat.js";
+import { mergePetLists, withPhotoUrls } from "./utils/pets.js";
+import { loadPublicPets } from "./publicPets.js";
 import {
   todayLocalISO, availableTimeSlots, formatTime12, isTimeAvailable,
 } from "./utils/booking.js";
@@ -152,22 +155,29 @@ function TagChip({ children }) {
   );
 }
 
-function BottomNav({ screen, setScreen, matchCount, apptCount }) {
-  const items = [
-    { key: "swipe", label: "Swipe", icon: PawPrint },
-    { key: "matches", label: "Matches", icon: Heart, badge: matchCount },
-    { key: "appointments", label: "Visits", icon: Calendar, badge: apptCount },
-    { key: "map", label: "Map", icon: MapPin },
-    { key: "chat", label: "AI", icon: MessageCircle },
-    { key: "profile", label: "Profile", icon: User },
-  ];
+function BottomNav({ screen, setScreen, matchCount, apptCount, isShelter }) {
+  const items = isShelter
+    ? [
+        { key: "listings", label: "Listings", icon: ClipboardList },
+        { key: "map", label: "Map", icon: MapPin },
+        { key: "profile", label: "Profile", icon: User },
+      ]
+    : [
+        { key: "swipe", label: "Swipe", icon: PawPrint },
+        { key: "matches", label: "Matches", icon: Heart, badge: matchCount },
+        { key: "appointments", label: "Visits", icon: Calendar, badge: apptCount },
+        { key: "map", label: "Map", icon: MapPin },
+        { key: "chat", label: "AI", icon: MessageCircle },
+        { key: "profile", label: "Profile", icon: User },
+      ];
   return (
     <div
       style={{
         background: "var(--pine)",
         borderTop: "3px solid var(--mustard)",
+        gridTemplateColumns: `repeat(${items.length}, minmax(0, 1fr))`,
       }}
-      className="grid grid-cols-6 py-2 px-1 sticky bottom-0"
+      className="grid py-2 px-1 sticky bottom-0"
     >
       {items.map(({ key, label, icon: Icon, badge }) => (
         <button
@@ -311,6 +321,60 @@ function Onboarding({ onDone }) {
             ))}
           </div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function ShelterOnboarding({ shelterName, onDone }) {
+  const [name, setName] = useState(shelterName || "");
+  const [location, setLocation] = useState("");
+
+  return (
+    <div className="pt-root min-h-full flex flex-col items-center justify-center px-6 py-10">
+      <div className="pt-float mb-2"><PawPrint size={44} color="var(--pine)" /></div>
+      <h1 className="pt-display text-3xl mb-1" style={{ color: "var(--pine)" }}>Shelter setup</h1>
+      <p className="text-xs mb-8 text-center max-w-sm" style={{ color: "var(--ink)", opacity: 0.65 }}>
+        Confirm your shelter details, then start posting adoptable pets.
+      </p>
+
+      <div className="w-full max-w-sm pt-card-shadow rounded-2xl p-6" style={{ background: "white" }}>
+        <label className="pt-stamp text-xs block mb-1">Shelter name</label>
+        <input
+          autoFocus
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="Hillsboro Paws Rescue"
+          className="w-full px-4 py-3 rounded-xl mb-4"
+          style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
+        />
+
+        <label className="pt-stamp text-xs block mb-1">City / address shown on pet cards</label>
+        <input
+          value={location}
+          onChange={(e) => setLocation(e.target.value)}
+          placeholder="Portland, OR"
+          className="w-full px-4 py-3 rounded-xl mb-5"
+          style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
+        />
+
+        <button
+          disabled={!name.trim() || !location.trim()}
+          onClick={() => onDone({
+            role: "shelter",
+            name: name.trim(),
+            shelterName: name.trim(),
+            shelterLocation: location.trim(),
+          })}
+          className="pt-display w-full py-3 rounded-xl text-white"
+          style={{
+            background: name.trim() && location.trim() ? "var(--pine)" : "var(--clip)",
+            border: "none",
+            cursor: name.trim() && location.trim() ? "pointer" : "not-allowed",
+          }}
+        >
+          Open listings dashboard
+        </button>
       </div>
     </div>
   );
@@ -923,7 +987,7 @@ export default function App() {
     setSyncNote("");
   };
 
-  const applySavedData = (saved) => {
+  const applySavedData = (saved, accountType) => {
     if (saved?.profile) {
       setProfile(saved.profile);
       setWeights(saved.weights || {});
@@ -935,6 +999,9 @@ export default function App() {
       setActiveChatId(saved.activeChatId || sessions[0]?.id || null);
       setSyncNote("Welcome back! Loaded your saved profile.");
       setTimeout(() => setSyncNote(""), 3000);
+      if (accountType === "shelter" || saved.profile.role === "shelter") {
+        setScreen("listings");
+      }
     } else {
       setProfile(null);
       setWeights({});
@@ -947,13 +1014,33 @@ export default function App() {
   };
 
   const hydrateUser = async (nextUser) => {
-    setUser(nextUser);
+    const saved = await loadUserData(nextUser.uid);
+    const accountType = saved?.accountType || nextUser.accountType || "adopter";
+    const shelterName = saved?.shelterName || nextUser.shelterName || "";
+    setUser({ ...nextUser, accountType, shelterName });
     hydrating.current = true;
     queueInitialized.current = false;
-    const saved = await loadUserData(nextUser.uid);
-    applySavedData(saved);
+    applySavedData(saved, accountType);
     setTimeout(() => { hydrating.current = false; }, 0);
   };
+
+  const reloadPets = useCallback(async () => {
+    setLoading(true);
+    let list;
+    try {
+      const res = await fetch(PETS_URL);
+      if (!res.ok) throw new Error("bad response");
+      list = await res.json();
+      if (!Array.isArray(list) || list.length === 0) throw new Error("empty");
+    } catch {
+      list = FALLBACK_PETS;
+    }
+    const publicList = await loadPublicPets();
+    const merged = mergePetLists(list, publicList);
+    setPets(withPhotoUrls(merged));
+    queueInitialized.current = false;
+    setLoading(false);
+  }, []);
 
   useEffect(() => {
     if (!isFirebaseConfigured()) {
@@ -988,36 +1075,20 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    let cancelled = false;
-    async function load() {
-      let list;
-      try {
-        const res = await fetch(PETS_URL);
-        if (!res.ok) throw new Error("bad response");
-        list = await res.json();
-        if (!Array.isArray(list) || list.length === 0) throw new Error("empty");
-      } catch {
-        list = FALLBACK_PETS;
-      }
-      const withPhotos = list.map((p) => ({ ...p, photoUrl: photoUrlFor(p) }));
-      if (!cancelled) {
-        setPets(withPhotos);
-        setLoading(false);
-      }
-    }
-    load();
-    return () => { cancelled = true; };
-  }, []);
+    reloadPets();
+  }, [reloadPets]);
 
   useEffect(() => {
     if (queueInitialized.current) return;
     if (pets.length === 0 || !user || !profile) return;
+    if (user.accountType === "shelter" || profile.role === "shelter") return;
     setQueue(buildSwipeQueue(pets, profile, weights, matches));
     queueInitialized.current = true;
   }, [pets, user, profile, matches, weights]);
 
   useEffect(() => {
     if (!profile || chatSessions.length > 0) return;
+    if (profile.role === "shelter") return;
     const first = createChatSession(profile);
     setChatSessions([first]);
     setActiveChatId(first.id);
@@ -1031,9 +1102,25 @@ export default function App() {
     setProfile(newProfile);
     if (user) {
       await saveUserData(user.uid, {
+        accountType: user.accountType || "adopter",
+        shelterName: user.shelterName || "",
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [firstChat], activeChatId: firstChat.id,
+      });
+    }
+  };
+
+  const handleShelterOnboardingDone = async (newProfile) => {
+    setProfile(newProfile);
+    setScreen("listings");
+    if (user) {
+      await saveUserData(user.uid, {
+        accountType: "shelter",
+        shelterName: newProfile.shelterName,
+        profile: newProfile,
+        weights: {}, history: [], matches: [], appointments: [],
+        chatSessions: [], activeChatId: null,
       });
     }
   };
@@ -1043,6 +1130,8 @@ export default function App() {
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
       saveUserData(user.uid, {
+        accountType: user.accountType || "adopter",
+        shelterName: user.shelterName || profile?.shelterName || "",
         profile, weights, history, matches, appointments,
         chatSessions, activeChatId,
       });
@@ -1123,6 +1212,7 @@ export default function App() {
   }
 
   if (!profile) {
+    const isShelter = user.accountType === "shelter";
     return (
       <div className="pt-root h-full min-h-[640px] flex flex-col">
         <GlobalStyle />
@@ -1130,11 +1220,17 @@ export default function App() {
           <SignOutButton onClick={handleLogout} />
         </div>
         <div className="flex-1 min-h-0">
-          <Onboarding onDone={handleOnboardingDone} />
+          {isShelter ? (
+            <ShelterOnboarding shelterName={user.shelterName} onDone={handleShelterOnboardingDone} />
+          ) : (
+            <Onboarding onDone={handleOnboardingDone} />
+          )}
         </div>
       </div>
     );
   }
+
+  const isShelter = user.accountType === "shelter" || profile.role === "shelter";
 
   return (
     <div className="pt-root h-full min-h-[640px] flex flex-col" style={{ maxWidth: 420, margin: "0 auto" }}>
@@ -1162,6 +1258,8 @@ export default function App() {
             <div className="pt-float"><PawPrint size={36} color="var(--pine)" /></div>
             <p className="pt-stamp text-xs mt-3" style={{ color: "var(--ink)", opacity: 0.6 }}>Fetching kennel cards…</p>
           </div>
+        ) : screen === "listings" ? (
+          <ShelterListingsScreen user={user} profile={profile} onPetsUpdated={reloadPets} />
         ) : screen === "swipe" ? (
           <SwipeScreen
             profile={profile}
@@ -1196,7 +1294,13 @@ export default function App() {
         )}
       </div>
 
-      <BottomNav screen={screen} setScreen={setScreen} matchCount={matches.length} apptCount={appointments.length} />
+      <BottomNav
+        screen={screen}
+        setScreen={setScreen}
+        matchCount={matches.length}
+        apptCount={appointments.length}
+        isShelter={isShelter}
+      />
 
       {booking && <BookingModal pet={booking} onClose={() => setBooking(null)} onConfirm={handleBookConfirm} />}
     </div>

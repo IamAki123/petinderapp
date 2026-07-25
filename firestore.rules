@@ -4,5 +4,13 @@ service cloud.firestore {
     match /users/{userId} {
       allow read, write: if request.auth != null && request.auth.uid == userId;
     }
+
+    match /publicPets/{petId} {
+      allow read: if true;
+      allow create: if request.auth != null
+        && request.resource.data.shelterUid == request.auth.uid;
+      allow update, delete: if request.auth != null
+        && resource.data.shelterUid == request.auth.uid;
+    }
   }
 }

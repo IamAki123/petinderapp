@@ -6,6 +6,7 @@ import {
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "../firebase.js";
 import { loadAccount, saveAccount, saveSession } from "../storage.js";
+import { saveUserData } from "../userData.js";
 
 function friendlyAuthError(code) {
   const map = {
@@ -20,11 +21,48 @@ function friendlyAuthError(code) {
   return map[code] || "Something went wrong. Please try again.";
 }
 
+function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterName }) {
+  return (
+    <>
+      <label className="flex items-start gap-2 mb-3 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={isShelter}
+          onChange={(e) => setIsShelter(e.target.checked)}
+          className="mt-1"
+        />
+        <span className="text-sm" style={{ color: "var(--ink)" }}>
+          Create a shelter account
+          <span className="block text-xs mt-0.5" style={{ opacity: 0.65 }}>
+            List adoptable pets that appear in everyone&apos;s swipe feed.
+          </span>
+        </span>
+      </label>
+
+      {isShelter && (
+        <>
+          <label className="pt-stamp text-xs block mb-1">Shelter name</label>
+          <input
+            type="text"
+            value={shelterName}
+            onChange={(e) => setShelterName(e.target.value)}
+            placeholder="e.g. Hillsboro Paws Rescue"
+            className="w-full px-4 py-3 rounded-xl mb-3"
+            style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
+          />
+        </>
+      )}
+    </>
+  );
+}
+
 function LocalAuthScreen({ onAuthSuccess }) {
   const [mode, setMode] = useState("login");
   const [username, setUsername] = useState("");
   const [passcode, setPasscode] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [isShelter, setIsShelter] = useState(false);
+  const [shelterName, setShelterName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -44,6 +82,10 @@ function LocalAuthScreen({ onAuthSuccess }) {
         setError("Passcodes do not match.");
         return;
       }
+      if (isShelter && !shelterName.trim()) {
+        setError("Enter your shelter name.");
+        return;
+      }
     }
 
     setBusy(true);
@@ -54,18 +96,36 @@ function LocalAuthScreen({ onAuthSuccess }) {
           setError("Wrong username or passcode.");
           return;
         }
-      } else if (existing) {
+        saveSession(trimmed);
+        onAuthSuccess({
+          uid: trimmed.toLowerCase(),
+          username: trimmed,
+          mode: "local",
+          accountType: existing.accountType || "adopter",
+          shelterName: existing.shelterName || "",
+        });
+        return;
+      }
+
+      if (existing) {
         setError("That username is already taken. Try logging in.");
         return;
-      } else {
-        await saveAccount(trimmed, { passcode });
       }
+
+      const accountType = isShelter ? "shelter" : "adopter";
+      await saveAccount(trimmed, {
+        passcode,
+        accountType,
+        shelterName: isShelter ? shelterName.trim() : "",
+      });
 
       saveSession(trimmed);
       onAuthSuccess({
         uid: trimmed.toLowerCase(),
         username: trimmed,
         mode: "local",
+        accountType,
+        shelterName: isShelter ? shelterName.trim() : "",
       });
     } finally {
       setBusy(false);
@@ -106,7 +166,7 @@ function LocalAuthScreen({ onAuthSuccess }) {
         <p className="text-xs mb-4" style={{ color: "var(--ink)", opacity: 0.65 }}>
           {mode === "login"
             ? "Enter the username and passcode you saved on this device."
-            : "Pick a username and passcode — your profile stays on this browser."}
+            : "Pick a username and passcode — adopters swipe, shelters publish pets."}
         </p>
 
         <label className="pt-stamp text-xs block mb-1">Username</label>
@@ -146,6 +206,12 @@ function LocalAuthScreen({ onAuthSuccess }) {
               className="w-full px-4 py-3 rounded-xl mb-3"
               style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
             />
+            <ShelterSignupFields
+              isShelter={isShelter}
+              setIsShelter={setIsShelter}
+              shelterName={shelterName}
+              setShelterName={setShelterName}
+            />
           </>
         )}
 
@@ -169,6 +235,8 @@ function FirebaseAuthScreen() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [confirm, setConfirm] = useState("");
+  const [isShelter, setIsShelter] = useState(false);
+  const [shelterName, setShelterName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
 
@@ -188,6 +256,10 @@ function FirebaseAuthScreen() {
         setError("Passwords do not match.");
         return;
       }
+      if (isShelter && !shelterName.trim()) {
+        setError("Enter your shelter name.");
+        return;
+      }
     }
 
     setBusy(true);
@@ -195,7 +267,11 @@ function FirebaseAuthScreen() {
       const auth = getFirebaseAuth();
       if (!auth) throw new Error("Firebase not configured");
       if (mode === "signup") {
-        await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+        const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+        await saveUserData(cred.user.uid, {
+          accountType: isShelter ? "shelter" : "adopter",
+          shelterName: isShelter ? shelterName.trim() : "",
+        });
       } else {
         await signInWithEmailAndPassword(auth, trimmedEmail, password);
       }
@@ -237,7 +313,7 @@ function FirebaseAuthScreen() {
         <p className="text-xs mb-4" style={{ color: "var(--ink)", opacity: 0.65 }}>
           {mode === "login"
             ? "Log in to sync matches, visits, and chats across devices."
-            : "Sign up with email — your profile saves to the cloud."}
+            : "Adopters swipe pets. Shelters publish listings for everyone to see."}
         </p>
 
         <label className="pt-stamp text-xs block mb-1">Email</label>
@@ -276,6 +352,12 @@ function FirebaseAuthScreen() {
               placeholder="repeat password"
               className="w-full px-4 py-3 rounded-xl mb-3"
               style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
+            />
+            <ShelterSignupFields
+              isShelter={isShelter}
+              setIsShelter={setIsShelter}
+              shelterName={shelterName}
+              setShelterName={setShelterName}
             />
           </>
         )}
