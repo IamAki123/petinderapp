@@ -1017,15 +1017,39 @@ export default function App() {
   };
 
   const hydrateUser = async (nextUser) => {
-    const saved = await loadUserData(nextUser.uid);
-    const accountType = saved?.accountType || nextUser.accountType || "adopter";
-    const shelterName = saved?.shelterName || nextUser.shelterName || "";
-    setUser({ ...nextUser, accountType, shelterName });
+    setUser({
+      ...nextUser,
+      accountType: nextUser.accountType || "adopter",
+      shelterName: nextUser.shelterName || "",
+    });
     hydrating.current = true;
     queueInitialized.current = false;
-    applySavedData(saved, accountType);
-    setTimeout(() => { hydrating.current = false; }, 0);
+
+    try {
+      const saved = await loadUserData(nextUser.uid);
+      const accountType = saved?.accountType || nextUser.accountType || "adopter";
+      const shelterName = saved?.shelterName || nextUser.shelterName || "";
+      setUser({ ...nextUser, accountType, shelterName });
+      applySavedData(saved, accountType);
+    } catch (e) {
+      console.error("Failed to load saved profile:", e);
+    } finally {
+      setTimeout(() => { hydrating.current = false; }, 0);
+    }
   };
+
+  const handleAuthSuccess = useCallback(async (firebaseUser) => {
+    setAuthLoading(true);
+    try {
+      await hydrateUser({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || "",
+        mode: "firebase",
+      });
+    } finally {
+      setAuthLoading(false);
+    }
+  }, []);
 
   const reloadPets = useCallback(async () => {
     setLoading(true);
@@ -1053,15 +1077,18 @@ export default function App() {
 
     const auth = getFirebaseAuth();
     const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      if (!firebaseUser) {
-        setUser(null);
-        resetAppState();
+      try {
+        if (!firebaseUser) {
+          setUser(null);
+          resetAppState();
+          return;
+        }
+        await hydrateUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", mode: "firebase" });
+      } catch (e) {
+        console.error("Auth hydrate failed:", e);
+      } finally {
         setAuthLoading(false);
-        return;
       }
-
-      await hydrateUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", mode: "firebase" });
-      setAuthLoading(false);
     });
 
     return unsub;
@@ -1217,7 +1244,7 @@ export default function App() {
     return (
       <div className="pt-root h-full min-h-[640px]">
         <GlobalStyle />
-        <AuthScreen />
+        <AuthScreen onAuthSuccess={handleAuthSuccess} />
       </div>
     );
   }

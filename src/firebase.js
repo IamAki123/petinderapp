@@ -1,5 +1,5 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+import { initializeAuth, indexedDBLocalPersistence, getAuth } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
@@ -27,7 +27,15 @@ export function isFirebaseConfigured() {
 function initFirebase() {
   if (app) return;
   app = initializeApp(firebaseConfig);
-  auth = getAuth(app);
+  try {
+    auth = initializeAuth(app, { persistence: indexedDBLocalPersistence });
+  } catch (e) {
+    if (e.code === "auth/already-initialized") {
+      auth = getAuth(app);
+    } else {
+      throw e;
+    }
+  }
   db = getFirestore(app);
 }
 

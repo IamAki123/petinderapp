@@ -7,7 +7,8 @@ import {
 import { getFirebaseAuth, isFirebaseConfigured } from "../firebase.js";
 import { saveUserData } from "../userData.js";
 
-function friendlyAuthError(code) {
+function friendlyAuthError(err) {
+  const code = err?.code || "";
   const map = {
     "auth/email-already-in-use": "That email is already registered. Try logging in.",
     "auth/invalid-email": "Enter a valid email address.",
@@ -16,8 +17,11 @@ function friendlyAuthError(code) {
     "auth/user-not-found": "No account found with that email.",
     "auth/wrong-password": "Wrong email or password.",
     "auth/too-many-requests": "Too many attempts. Wait a moment and try again.",
+    "auth/operation-not-allowed": "Email/password sign-in is not enabled in Firebase. Enable it under Authentication → Sign-in method.",
+    "auth/unauthorized-domain": "This website URL is not allowed in Firebase. Add your Vercel URL under Authentication → Settings → Authorized domains.",
+    "auth/network-request-failed": "Network error. Check your connection and try again.",
   };
-  return map[code] || "Something went wrong. Please try again.";
+  return map[code] || err?.message || "Something went wrong. Please try again.";
 }
 
 function FirebaseSetupScreen() {
@@ -78,7 +82,7 @@ function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterN
   );
 }
 
-export default function AuthScreen() {
+export default function AuthScreen({ onAuthSuccess }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -118,17 +122,21 @@ export default function AuthScreen() {
     try {
       const auth = getFirebaseAuth();
       if (!auth) throw new Error("Firebase not configured");
+      let cred;
       if (mode === "signup") {
-        const cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
+        cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
         await saveUserData(cred.user.uid, {
           accountType: isShelter ? "shelter" : "adopter",
           shelterName: isShelter ? shelterName.trim() : "",
         });
       } else {
-        await signInWithEmailAndPassword(auth, trimmedEmail, password);
+        cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
+      }
+      if (onAuthSuccess) {
+        await onAuthSuccess(cred.user);
       }
     } catch (err) {
-      setError(friendlyAuthError(err.code));
+      setError(friendlyAuthError(err));
     } finally {
       setBusy(false);
     }
