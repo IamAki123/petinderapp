@@ -6,6 +6,7 @@ import {
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "../firebase.js";
 import { saveUserData } from "../userData.js";
+import { userRecordPayload } from "../utils/profile.js";
 
 function friendlyAuthError(err) {
   const code = err?.code || "";
@@ -125,15 +126,24 @@ export default function AuthScreen({ onAuthSuccess }) {
       let cred;
       if (mode === "signup") {
         cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
-        await saveUserData(cred.user.uid, {
-          accountType: isShelter ? "shelter" : "adopter",
-          shelterName: isShelter ? shelterName.trim() : "",
-        });
+        const accountType = isShelter ? "shelter" : "adopter";
+        const trimmedShelter = isShelter ? shelterName.trim() : "";
+        await saveUserData(cred.user.uid, userRecordPayload(cred.user, {
+          accountType,
+          shelterName: trimmedShelter,
+        }));
+        if (onAuthSuccess) {
+          await onAuthSuccess(cred.user, {
+            isNewSignup: true,
+            accountType,
+            shelterName: trimmedShelter,
+          });
+        }
       } else {
         cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
-      }
-      if (onAuthSuccess) {
-        await onAuthSuccess(cred.user);
+        if (onAuthSuccess) {
+          await onAuthSuccess(cred.user, { isNewSignup: false });
+        }
       }
     } catch (err) {
       setError(friendlyAuthError(err));
@@ -172,8 +182,8 @@ export default function AuthScreen({ onAuthSuccess }) {
         </h2>
         <p className="text-xs mb-4" style={{ color: "var(--ink)", opacity: 0.65 }}>
           {mode === "login"
-            ? "Same email works on your phone, computer, and anywhere else."
-            : "Adopters swipe pets. Shelters publish listings for everyone to see."}
+            ? "Your saved preferences load automatically. No profile yet? You can still browse pets."
+            : "Create an account, then set up your profile. Adopters swipe; shelters publish listings."}
         </p>
 
         <label className="pt-stamp text-xs block mb-1">Email</label>

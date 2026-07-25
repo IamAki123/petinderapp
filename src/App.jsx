@@ -11,6 +11,7 @@ import ShelterListingsScreen from "./components/ShelterListingsScreen.jsx";
 import ShelterMessagesScreen from "./components/ShelterMessagesScreen.jsx";
 import { createChatSession, normalizeChatSessions } from "./utils/chat.js";
 import { mergePetLists, withPhotoUrls } from "./utils/pets.js";
+import { defaultAdopterProfile, defaultShelterProfile, userRecordPayload } from "./utils/profile.js";
 import { loadPublicPets } from "./publicPets.js";
 import { notifyShelterOfAppointment, subscribeShelterMessages, markAllMessagesRead } from "./messages.js";
 import {
@@ -972,6 +973,8 @@ export default function App() {
   const [syncNote, setSyncNote] = useState("");
   const [shelterMessages, setShelterMessages] = useState([]);
   const [profileReady, setProfileReady] = useState(false);
+  const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
+  const skipNextAuthHydrate = useRef(false);
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
@@ -980,6 +983,7 @@ export default function App() {
     queueInitialized.current = false;
     setProfile(null);
     setProfileReady(false);
+    setNeedsProfileSetup(false);
     setQueue([]);
     setWeights({});
     setHistory([]);
@@ -1018,7 +1022,26 @@ export default function App() {
     }
   };
 
-  const hydrateUser = async (nextUser) => {
+  const initFreshSession = (newProfile, accountType) => {
+    setProfile(newProfile);
+    setWeights({});
+    setHistory([]);
+    setMatches([]);
+    setAppointments([]);
+    if (accountType === "shelter" || newProfile.role === "shelter") {
+      setChatSessions([]);
+      setActiveChatId(null);
+      setScreen("listings");
+    } else {
+      const firstChat = createChatSession(newProfile);
+      setChatSessions([firstChat]);
+      setActiveChatId(firstChat.id);
+      setScreen("swipe");
+    }
+    setNeedsProfileSetup(false);
+  };
+
+  const hydrateUser = async (nextUser, { isNewSignup = false } = {}) => {
     setProfileReady(false);
     setUser({
       ...nextUser,
@@ -1033,23 +1056,58 @@ export default function App() {
       const accountType = saved?.accountType || nextUser.accountType || "adopter";
       const shelterName = saved?.shelterName || nextUser.shelterName || "";
       setUser({ ...nextUser, accountType, shelterName });
-      applySavedData(saved, accountType);
+
+      if (saved?.profile) {
+        applySavedData(saved, accountType);
+        setNeedsProfileSetup(false);
+      } else if (isNewSignup) {
+        setProfile(null);
+        setWeights({});
+        setHistory([]);
+        setMatches([]);
+        setAppointments([]);
+        setChatSessions([]);
+        setActiveChatId(null);
+        setNeedsProfileSetup(true);
+      } else {
+        const fallbackProfile = accountType === "shelter"
+          ? defaultShelterProfile(nextUser.email, shelterName)
+          : defaultAdopterProfile(nextUser.email);
+        initFreshSession(fallbackProfile, accountType);
+        setSyncNote("No saved preferences yet — showing all pets.");
+        setTimeout(() => setSyncNote(""), 3000);
+      }
     } catch (e) {
       console.error("Failed to load saved profile:", e);
-      setSyncNote("Could not load your saved profile. You may need to answer the setup questions again.");
-      setTimeout(() => setSyncNote(""), 4000);
+      if (isNewSignup) {
+        setNeedsProfileSetup(true);
+      } else {
+        const accountType = nextUser.accountType || "adopter";
+        initFreshSession(
+          accountType === "shelter"
+            ? defaultShelterProfile(nextUser.email, nextUser.shelterName)
+            : defaultAdopterProfile(nextUser.email),
+          accountType
+        );
+      }
     } finally {
       setProfileReady(true);
       setTimeout(() => { hydrating.current = false; }, 0);
     }
   };
 
-  const handleAuthSuccess = useCallback(async (firebaseUser) => {
-    await hydrateUser({
-      uid: firebaseUser.uid,
-      email: firebaseUser.email || "",
-      mode: "firebase",
-    });
+  const handleAuthSuccess = useCallback(async (firebaseUser, { isNewSignup = false, accountType, shelterName } = {}) => {
+    skipNextAuthHydrate.current = true;
+    await hydrateUser(
+      {
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || "",
+        mode: "firebase",
+        accountType,
+        shelterName,
+      },
+      { isNewSignup }
+    );
   }, []);
 
   const reloadPets = useCallback(async () => {
@@ -1103,11 +1161,15 @@ export default function App() {
         return;
       }
 
-      hydrateUser({
-        uid: firebaseUser.uid,
-        email: firebaseUser.email || "",
-        mode: "firebase",
-      }).catch((e) => console.error("Auth hydrate failed:", e));
+      if (skipNextAuthHydrate.current) {
+        skipNextAuthHydrate.current = false;
+        return;
+      }
+
+      hydrateUser(
+        { uid: firebaseUser.uid, email: firebaseUser.email || "", mode: "firebase" },
+        { isNewSignup: false }
+      ).catch((e) => console.error("Auth hydrate failed:", e));
     });
 
     return () => {
@@ -1153,40 +1215,40 @@ export default function App() {
 
   const handleOnboardingDone = async (newProfile) => {
     queueInitialized.current = false;
+    setNeedsProfileSetup(false);
+    setProfile(newProfile);
     const firstChat = createChatSession(newProfile);
     setChatSessions([firstChat]);
     setActiveChatId(firstChat.id);
-    setProfile(newProfile);
     if (user) {
-      const saved = await saveUserData(user.uid, {
+      const saved = await saveUserData(user.uid, userRecordPayload(user, {
         accountType: user.accountType || "adopter",
         shelterName: user.shelterName || "",
-        onboardingComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [firstChat], activeChatId: firstChat.id,
-      });
+      }));
       if (!saved) {
-        setSyncNote("Could not save your profile to the cloud. Check Firebase/Firestore setup.");
+        setSyncNote("Could not save your profile. Check Firestore rules in Firebase.");
         setTimeout(() => setSyncNote(""), 5000);
       }
     }
   };
 
   const handleShelterOnboardingDone = async (newProfile) => {
+    setNeedsProfileSetup(false);
     setProfile(newProfile);
     setScreen("listings");
     if (user) {
-      const saved = await saveUserData(user.uid, {
+      const saved = await saveUserData(user.uid, userRecordPayload(user, {
         accountType: "shelter",
         shelterName: newProfile.shelterName,
-        onboardingComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [], activeChatId: null,
-      });
+      }));
       if (!saved) {
-        setSyncNote("Could not save your shelter profile to the cloud. Check Firebase/Firestore setup.");
+        setSyncNote("Could not save your shelter profile. Check Firestore rules in Firebase.");
         setTimeout(() => setSyncNote(""), 5000);
       }
     }
@@ -1196,13 +1258,12 @@ export default function App() {
     if (!user || !profile || hydrating.current) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveUserData(user.uid, {
+      saveUserData(user.uid, userRecordPayload(user, {
         accountType: user.accountType || "adopter",
         shelterName: user.shelterName || profile?.shelterName || "",
-        onboardingComplete: true,
         profile, weights, history, matches, appointments,
         chatSessions, activeChatId,
-      });
+      }));
     }, 500);
     return () => clearTimeout(saveTimer.current);
   }, [profile, weights, history, matches, appointments, chatSessions, activeChatId, user]);
@@ -1292,7 +1353,7 @@ export default function App() {
     );
   }
 
-  if (!profile) {
+  if (needsProfileSetup) {
     const isShelter = user.accountType === "shelter";
     return (
       <div className="pt-root h-full min-h-[640px] flex flex-col">
@@ -1307,6 +1368,16 @@ export default function App() {
             <Onboarding onDone={handleOnboardingDone} />
           )}
         </div>
+      </div>
+    );
+  }
+
+  if (!profile) {
+    return (
+      <div className="pt-root h-full min-h-[640px] flex flex-col items-center justify-center">
+        <GlobalStyle />
+        <PawPrint size={36} color="var(--pine)" className="pt-float" />
+        <p className="pt-stamp text-xs mt-3" style={{ color: "var(--ink)", opacity: 0.6 }}>Starting up…</p>
       </div>
     );
   }
