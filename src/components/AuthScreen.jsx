@@ -83,7 +83,7 @@ function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterN
   );
 }
 
-export default function AuthScreen({ onAuthSuccess }) {
+export default function AuthScreen({ prepareAuth }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -123,28 +123,27 @@ export default function AuthScreen({ onAuthSuccess }) {
     try {
       const auth = getFirebaseAuth();
       if (!auth) throw new Error("Firebase not configured");
+
+      const accountType = isShelter ? "shelter" : "adopter";
+      const trimmedShelter = isShelter ? shelterName.trim() : "";
+      const hydratePromise = prepareAuth?.({
+        isNewSignup: mode === "signup",
+        accountType: mode === "signup" ? accountType : undefined,
+        shelterName: mode === "signup" ? trimmedShelter : undefined,
+      });
+
       let cred;
       if (mode === "signup") {
         cred = await createUserWithEmailAndPassword(auth, trimmedEmail, password);
-        const accountType = isShelter ? "shelter" : "adopter";
-        const trimmedShelter = isShelter ? shelterName.trim() : "";
         await saveUserData(cred.user.uid, userRecordPayload(cred.user, {
           accountType,
           shelterName: trimmedShelter,
         }));
-        if (onAuthSuccess) {
-          await onAuthSuccess(cred.user, {
-            isNewSignup: true,
-            accountType,
-            shelterName: trimmedShelter,
-          });
-        }
       } else {
         cred = await signInWithEmailAndPassword(auth, trimmedEmail, password);
-        if (onAuthSuccess) {
-          await onAuthSuccess(cred.user, { isNewSignup: false });
-        }
       }
+
+      if (hydratePromise) await hydratePromise;
     } catch (err) {
       setError(friendlyAuthError(err));
     } finally {

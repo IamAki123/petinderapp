@@ -974,7 +974,9 @@ export default function App() {
   const [shelterMessages, setShelterMessages] = useState([]);
   const [profileReady, setProfileReady] = useState(false);
   const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
-  const skipNextAuthHydrate = useRef(false);
+  const authIntentRef = useRef(null);
+  const authHydrateResolve = useRef(null);
+  const hydrateGeneration = useRef(0);
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
@@ -1042,6 +1044,7 @@ export default function App() {
   };
 
   const hydrateUser = async (nextUser, { isNewSignup = false } = {}) => {
+    const gen = ++hydrateGeneration.current;
     setProfileReady(false);
     setUser({
       ...nextUser,
@@ -1051,8 +1054,19 @@ export default function App() {
     hydrating.current = true;
     queueInitialized.current = false;
 
+    const finishHydrate = () => {
+      if (gen !== hydrateGeneration.current) return;
+      setProfileReady(true);
+      const resolve = authHydrateResolve.current;
+      authHydrateResolve.current = null;
+      resolve?.();
+      setTimeout(() => { hydrating.current = false; }, 0);
+    };
+
     try {
       const saved = await loadUserData(nextUser.uid);
+      if (gen !== hydrateGeneration.current) return;
+
       const accountType = saved?.accountType || nextUser.accountType || "adopter";
       const shelterName = saved?.shelterName || nextUser.shelterName || "";
       setUser({ ...nextUser, accountType, shelterName });
@@ -1078,6 +1092,7 @@ export default function App() {
         setTimeout(() => setSyncNote(""), 3000);
       }
     } catch (e) {
+      if (gen !== hydrateGeneration.current) return;
       console.error("Failed to load saved profile:", e);
       if (isNewSignup) {
         setNeedsProfileSetup(true);
@@ -1091,23 +1106,19 @@ export default function App() {
         );
       }
     } finally {
-      setProfileReady(true);
-      setTimeout(() => { hydrating.current = false; }, 0);
+      finishHydrate();
     }
   };
 
-  const handleAuthSuccess = useCallback(async (firebaseUser, { isNewSignup = false, accountType, shelterName } = {}) => {
-    skipNextAuthHydrate.current = true;
-    await hydrateUser(
-      {
-        uid: firebaseUser.uid,
-        email: firebaseUser.email || "",
-        mode: "firebase",
-        accountType,
-        shelterName,
-      },
-      { isNewSignup }
-    );
+  const prepareAuth = useCallback((intent) => {
+    authIntentRef.current = intent;
+    const hydrateDone = new Promise((resolve) => {
+      authHydrateResolve.current = resolve;
+    });
+    const timeout = new Promise((resolve) => {
+      setTimeout(resolve, 12000);
+    });
+    return Promise.race([hydrateDone, timeout]);
   }, []);
 
   const reloadPets = useCallback(async () => {
@@ -1161,14 +1172,18 @@ export default function App() {
         return;
       }
 
-      if (skipNextAuthHydrate.current) {
-        skipNextAuthHydrate.current = false;
-        return;
-      }
+      const intent = authIntentRef.current;
+      if (intent) authIntentRef.current = null;
 
       hydrateUser(
-        { uid: firebaseUser.uid, email: firebaseUser.email || "", mode: "firebase" },
-        { isNewSignup: false }
+        {
+          uid: firebaseUser.uid,
+          email: firebaseUser.email || "",
+          mode: "firebase",
+          accountType: intent?.accountType,
+          shelterName: intent?.shelterName,
+        },
+        { isNewSignup: intent?.isNewSignup ?? false }
       ).catch((e) => console.error("Auth hydrate failed:", e));
     });
 
@@ -1213,8 +1228,26 @@ export default function App() {
     setActiveChatId(first.id);
   }, [profile, chatSessions.length]);
 
+  const buildUserRecord = () => userRecordPayload(user, {
+    accountType: user.accountType || "adopter",
+    shelterName: user.shelterName || profile?.shelterName || "",
+    profile, weights, history, matches, appointments,
+    chatSessions, activeChatId,
+  });
+
+  const flushUserSave = async () => {
+    if (!user || !profile) return true;
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    return saveUserData(user.uid, buildUserRecord());
+  };
+
   const handleOnboardingDone = async (newProfile) => {
     queueInitialized.current = false;
+    hydrating.current = true;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
     setNeedsProfileSetup(false);
     setProfile(newProfile);
     const firstChat = createChatSession(newProfile);
@@ -1231,11 +1264,17 @@ export default function App() {
       if (!saved) {
         setSyncNote("Could not save your profile. Check Firestore rules in Firebase.");
         setTimeout(() => setSyncNote(""), 5000);
+      } else {
+        setSyncNote("Profile saved!");
+        setTimeout(() => setSyncNote(""), 2500);
       }
     }
+    hydrating.current = false;
   };
 
   const handleShelterOnboardingDone = async (newProfile) => {
+    hydrating.current = true;
+    if (saveTimer.current) clearTimeout(saveTimer.current);
     setNeedsProfileSetup(false);
     setProfile(newProfile);
     setScreen("listings");
@@ -1250,23 +1289,22 @@ export default function App() {
       if (!saved) {
         setSyncNote("Could not save your shelter profile. Check Firestore rules in Firebase.");
         setTimeout(() => setSyncNote(""), 5000);
+      } else {
+        setSyncNote("Shelter profile saved!");
+        setTimeout(() => setSyncNote(""), 2500);
       }
     }
+    hydrating.current = false;
   };
 
   useEffect(() => {
-    if (!user || !profile || hydrating.current) return;
+    if (!user || !profile || hydrating.current || needsProfileSetup) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveUserData(user.uid, userRecordPayload(user, {
-        accountType: user.accountType || "adopter",
-        shelterName: user.shelterName || profile?.shelterName || "",
-        profile, weights, history, matches, appointments,
-        chatSessions, activeChatId,
-      }));
+      saveUserData(user.uid, buildUserRecord());
     }, 500);
     return () => clearTimeout(saveTimer.current);
-  }, [profile, weights, history, matches, appointments, chatSessions, activeChatId, user]);
+  }, [profile, weights, history, matches, appointments, chatSessions, activeChatId, user, needsProfileSetup]);
 
   const handleMatch = (pet) => setMatches((m) => (m.some((p) => p.id === pet.id) ? m : [...m, pet]));
   const handleRemoveMatch = (petId) => {
@@ -1314,6 +1352,7 @@ export default function App() {
   };
 
   const handleLogout = async () => {
+    await flushUserSave();
     const auth = getFirebaseAuth();
     if (auth) await signOut(auth);
   };
@@ -1338,7 +1377,7 @@ export default function App() {
     return (
       <div className="pt-root h-full min-h-[640px]">
         <GlobalStyle />
-        <AuthScreen onAuthSuccess={handleAuthSuccess} />
+        <AuthScreen prepareAuth={prepareAuth} />
       </div>
     );
   }
