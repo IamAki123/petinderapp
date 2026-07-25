@@ -971,6 +971,7 @@ export default function App() {
   const [booking, setBooking] = useState(null);
   const [syncNote, setSyncNote] = useState("");
   const [shelterMessages, setShelterMessages] = useState([]);
+  const [profileReady, setProfileReady] = useState(false);
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
@@ -978,6 +979,7 @@ export default function App() {
   const resetAppState = () => {
     queueInitialized.current = false;
     setProfile(null);
+    setProfileReady(false);
     setQueue([]);
     setWeights({});
     setHistory([]);
@@ -1017,6 +1019,7 @@ export default function App() {
   };
 
   const hydrateUser = async (nextUser) => {
+    setProfileReady(false);
     setUser({
       ...nextUser,
       accountType: nextUser.accountType || "adopter",
@@ -1033,7 +1036,10 @@ export default function App() {
       applySavedData(saved, accountType);
     } catch (e) {
       console.error("Failed to load saved profile:", e);
+      setSyncNote("Could not load your saved profile. You may need to answer the setup questions again.");
+      setTimeout(() => setSyncNote(""), 4000);
     } finally {
+      setProfileReady(true);
       setTimeout(() => { hydrating.current = false; }, 0);
     }
   };
@@ -1143,13 +1149,18 @@ export default function App() {
     setActiveChatId(firstChat.id);
     setProfile(newProfile);
     if (user) {
-      await saveUserData(user.uid, {
+      const saved = await saveUserData(user.uid, {
         accountType: user.accountType || "adopter",
         shelterName: user.shelterName || "",
+        onboardingComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [firstChat], activeChatId: firstChat.id,
       });
+      if (!saved) {
+        setSyncNote("Could not save your profile to the cloud. Check Firebase/Firestore setup.");
+        setTimeout(() => setSyncNote(""), 5000);
+      }
     }
   };
 
@@ -1157,13 +1168,18 @@ export default function App() {
     setProfile(newProfile);
     setScreen("listings");
     if (user) {
-      await saveUserData(user.uid, {
+      const saved = await saveUserData(user.uid, {
         accountType: "shelter",
         shelterName: newProfile.shelterName,
+        onboardingComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [], activeChatId: null,
       });
+      if (!saved) {
+        setSyncNote("Could not save your shelter profile to the cloud. Check Firebase/Firestore setup.");
+        setTimeout(() => setSyncNote(""), 5000);
+      }
     }
   };
 
@@ -1174,6 +1190,7 @@ export default function App() {
       saveUserData(user.uid, {
         accountType: user.accountType || "adopter",
         shelterName: user.shelterName || profile?.shelterName || "",
+        onboardingComplete: true,
         profile, weights, history, matches, appointments,
         chatSessions, activeChatId,
       });
@@ -1252,6 +1269,16 @@ export default function App() {
       <div className="pt-root h-full min-h-[640px]">
         <GlobalStyle />
         <AuthScreen onAuthSuccess={handleAuthSuccess} />
+      </div>
+    );
+  }
+
+  if (!profileReady) {
+    return (
+      <div className="pt-root h-full min-h-[640px] flex flex-col items-center justify-center">
+        <GlobalStyle />
+        <PawPrint size={36} color="var(--pine)" className="pt-float" />
+        <p className="pt-stamp text-xs mt-3" style={{ color: "var(--ink)", opacity: 0.6 }}>Loading your profile…</p>
       </div>
     );
   }
