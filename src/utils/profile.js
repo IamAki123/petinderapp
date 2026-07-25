@@ -29,3 +29,21 @@ export function userRecordPayload(user, extra = {}) {
     ...extra,
   };
 }
+
+export function hasSavedProfile(saved) {
+  if (!saved?.profile) return false;
+  if (saved.profileSetupComplete) return true;
+  return hasRealPreferences(saved.profile);
+}
+
+function hasRealPreferences(profile) {
+  if (!profile?.name?.trim()) return false;
+  const fields = [
+    profile.living,
+    profile.experience,
+    profile.activity,
+    profile.hasKids,
+    profile.hasOtherPets,
+  ];
+  return fields.some((value) => value && value !== "No preference");
+}

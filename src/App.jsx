@@ -11,7 +11,7 @@ import ShelterListingsScreen from "./components/ShelterListingsScreen.jsx";
 import ShelterMessagesScreen from "./components/ShelterMessagesScreen.jsx";
 import { createChatSession, normalizeChatSessions } from "./utils/chat.js";
 import { mergePetLists, withPhotoUrls } from "./utils/pets.js";
-import { defaultAdopterProfile, defaultShelterProfile, userRecordPayload } from "./utils/profile.js";
+import { defaultAdopterProfile, defaultShelterProfile, userRecordPayload, hasSavedProfile } from "./utils/profile.js";
 import { loadPublicPets } from "./publicPets.js";
 import { notifyShelterOfAppointment, subscribeShelterMessages, markAllMessagesRead } from "./messages.js";
 import {
@@ -976,13 +976,14 @@ export default function App() {
   const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
   const authIntentRef = useRef(null);
   const authHydrateResolve = useRef(null);
-  const hydrateGeneration = useRef(0);
+  const hydratedUidRef = useRef(null);
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
 
   const resetAppState = () => {
     queueInitialized.current = false;
+    hydratedUidRef.current = null;
     setProfile(null);
     setProfileReady(false);
     setNeedsProfileSetup(false);
@@ -1043,37 +1044,35 @@ export default function App() {
     setNeedsProfileSetup(false);
   };
 
+  const resolveAuthWaiters = () => {
+    const resolve = authHydrateResolve.current;
+    authHydrateResolve.current = null;
+    resolve?.();
+  };
+
   const hydrateUser = async (nextUser, { isNewSignup = false } = {}) => {
-    const gen = ++hydrateGeneration.current;
+    if (!nextUser?.uid) return;
+
     setProfileReady(false);
+    hydrating.current = true;
+    queueInitialized.current = false;
+
     setUser({
       ...nextUser,
       accountType: nextUser.accountType || "adopter",
       shelterName: nextUser.shelterName || "",
     });
-    hydrating.current = true;
-    queueInitialized.current = false;
-
-    const finishHydrate = () => {
-      if (gen !== hydrateGeneration.current) return;
-      setProfileReady(true);
-      const resolve = authHydrateResolve.current;
-      authHydrateResolve.current = null;
-      resolve?.();
-      setTimeout(() => { hydrating.current = false; }, 0);
-    };
 
     try {
       const saved = await loadUserData(nextUser.uid);
-      if (gen !== hydrateGeneration.current) return;
-
       const accountType = saved?.accountType || nextUser.accountType || "adopter";
       const shelterName = saved?.shelterName || nextUser.shelterName || "";
       setUser({ ...nextUser, accountType, shelterName });
 
-      if (saved?.profile) {
+      if (hasSavedProfile(saved)) {
         applySavedData(saved, accountType);
         setNeedsProfileSetup(false);
+        hydratedUidRef.current = nextUser.uid;
       } else if (isNewSignup) {
         setProfile(null);
         setWeights({});
@@ -1083,16 +1082,17 @@ export default function App() {
         setChatSessions([]);
         setActiveChatId(null);
         setNeedsProfileSetup(true);
+        hydratedUidRef.current = nextUser.uid;
       } else {
         const fallbackProfile = accountType === "shelter"
           ? defaultShelterProfile(nextUser.email, shelterName)
           : defaultAdopterProfile(nextUser.email);
         initFreshSession(fallbackProfile, accountType);
+        hydratedUidRef.current = nextUser.uid;
         setSyncNote("No saved preferences yet — showing all pets.");
         setTimeout(() => setSyncNote(""), 3000);
       }
     } catch (e) {
-      if (gen !== hydrateGeneration.current) return;
       console.error("Failed to load saved profile:", e);
       if (isNewSignup) {
         setNeedsProfileSetup(true);
@@ -1105,20 +1105,21 @@ export default function App() {
           accountType
         );
       }
+      hydratedUidRef.current = nextUser.uid;
     } finally {
-      finishHydrate();
+      setProfileReady(true);
+      resolveAuthWaiters();
+      setTimeout(() => { hydrating.current = false; }, 0);
     }
   };
 
   const prepareAuth = useCallback((intent) => {
     authIntentRef.current = intent;
-    const hydrateDone = new Promise((resolve) => {
+    hydratedUidRef.current = null;
+    return new Promise((resolve) => {
       authHydrateResolve.current = resolve;
+      setTimeout(resolve, 15000);
     });
-    const timeout = new Promise((resolve) => {
-      setTimeout(resolve, 12000);
-    });
-    return Promise.race([hydrateDone, timeout]);
   }, []);
 
   const reloadPets = useCallback(async () => {
@@ -1142,11 +1143,21 @@ export default function App() {
   useEffect(() => {
     if (!user || profileReady) return undefined;
     const timer = setTimeout(() => {
-      console.warn("Profile load safety timeout — continuing without cloud profile");
+      console.warn("Profile load safety timeout — continuing with defaults");
+      if (!profile && !needsProfileSetup) {
+        const accountType = user.accountType || "adopter";
+        initFreshSession(
+          accountType === "shelter"
+            ? defaultShelterProfile(user.email, user.shelterName)
+            : defaultAdopterProfile(user.email),
+          accountType
+        );
+      }
       setProfileReady(true);
-    }, 9000);
+      resolveAuthWaiters();
+    }, 12000);
     return () => clearTimeout(timer);
-  }, [user, profileReady]);
+  }, [user, profileReady, profile, needsProfileSetup]);
 
   useEffect(() => {
     if (!isFirebaseConfigured()) {
@@ -1169,6 +1180,11 @@ export default function App() {
       if (!firebaseUser) {
         setUser(null);
         resetAppState();
+        return;
+      }
+
+      if (hydratedUidRef.current === firebaseUser.uid && !authIntentRef.current) {
+        setProfileReady(true);
         return;
       }
 
@@ -1220,19 +1236,13 @@ export default function App() {
     queueInitialized.current = true;
   }, [pets, user, profile, matches, weights]);
 
-  useEffect(() => {
-    if (!profile || chatSessions.length > 0) return;
-    if (profile.role === "shelter") return;
-    const first = createChatSession(profile);
-    setChatSessions([first]);
-    setActiveChatId(first.id);
-  }, [profile, chatSessions.length]);
-
-  const buildUserRecord = () => userRecordPayload(user, {
+  const buildUserRecord = (extra = {}) => userRecordPayload(user, {
     accountType: user.accountType || "adopter",
     shelterName: user.shelterName || profile?.shelterName || "",
+    profileSetupComplete: Boolean(profile?.name && !needsProfileSetup),
     profile, weights, history, matches, appointments,
     chatSessions, activeChatId,
+    ...extra,
   });
 
   const flushUserSave = async () => {
@@ -1254,16 +1264,15 @@ export default function App() {
     setChatSessions([firstChat]);
     setActiveChatId(firstChat.id);
     if (user) {
-      const saved = await saveUserData(user.uid, userRecordPayload(user, {
-        accountType: user.accountType || "adopter",
-        shelterName: user.shelterName || "",
+      const saved = await saveUserData(user.uid, buildUserRecord({
+        profileSetupComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [firstChat], activeChatId: firstChat.id,
       }));
       if (!saved) {
-        setSyncNote("Could not save your profile. Check Firestore rules in Firebase.");
-        setTimeout(() => setSyncNote(""), 5000);
+        setSyncNote("Could not save your profile. Publish Firestore rules in Firebase console.");
+        setTimeout(() => setSyncNote(""), 6000);
       } else {
         setSyncNote("Profile saved!");
         setTimeout(() => setSyncNote(""), 2500);
@@ -1279,7 +1288,8 @@ export default function App() {
     setProfile(newProfile);
     setScreen("listings");
     if (user) {
-      const saved = await saveUserData(user.uid, userRecordPayload(user, {
+      const saved = await saveUserData(user.uid, buildUserRecord({
+        profileSetupComplete: true,
         accountType: "shelter",
         shelterName: newProfile.shelterName,
         profile: newProfile,
@@ -1287,8 +1297,8 @@ export default function App() {
         chatSessions: [], activeChatId: null,
       }));
       if (!saved) {
-        setSyncNote("Could not save your shelter profile. Check Firestore rules in Firebase.");
-        setTimeout(() => setSyncNote(""), 5000);
+        setSyncNote("Could not save your shelter profile. Publish Firestore rules in Firebase console.");
+        setTimeout(() => setSyncNote(""), 6000);
       } else {
         setSyncNote("Shelter profile saved!");
         setTimeout(() => setSyncNote(""), 2500);
@@ -1299,12 +1309,13 @@ export default function App() {
 
   useEffect(() => {
     if (!user || !profile || hydrating.current || needsProfileSetup) return;
+    if (!profile.name) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveUserData(user.uid, buildUserRecord());
-    }, 500);
+      saveUserData(user.uid, buildUserRecord({ profileSetupComplete: true }));
+    }, 2500);
     return () => clearTimeout(saveTimer.current);
-  }, [profile, weights, history, matches, appointments, chatSessions, activeChatId, user, needsProfileSetup]);
+  }, [profile, weights, history, matches, appointments, user, needsProfileSetup]);
 
   const handleMatch = (pet) => setMatches((m) => (m.some((p) => p.id === pet.id) ? m : [...m, pet]));
   const handleRemoveMatch = (petId) => {

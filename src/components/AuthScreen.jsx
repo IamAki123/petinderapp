@@ -146,6 +146,9 @@ export default function AuthScreen({ prepareAuth }) {
       if (hydratePromise) await hydratePromise;
     } catch (err) {
       setError(friendlyAuthError(err));
+      if (prepareAuth) {
+        await new Promise((resolve) => setTimeout(resolve, 0));
+      }
     } finally {
       setBusy(false);
     }
