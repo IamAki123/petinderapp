@@ -1153,6 +1153,15 @@ export default function App() {
     });
   }, []);
 
+  // Called when a login/signup attempt fails, so a stale intent doesn't
+  // corrupt the next successful auth (e.g. treating a login as a signup).
+  const cancelAuth = useCallback(() => {
+    authIntentRef.current = null;
+    const resolve = authHydrateResolve.current;
+    authHydrateResolve.current = null;
+    resolve?.();
+  }, []);
+
   const reloadPets = useCallback(async () => {
     setLoading(true);
     let list;
@@ -1475,7 +1484,7 @@ export default function App() {
     return (
       <div className="pt-root h-full min-h-[640px]">
         <GlobalStyle />
-        <AuthScreen prepareAuth={prepareAuth} />
+        <AuthScreen prepareAuth={prepareAuth} cancelAuth={cancelAuth} />
       </div>
     );
   }

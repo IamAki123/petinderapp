@@ -83,7 +83,7 @@ function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterN
   );
 }
 
-export default function AuthScreen({ prepareAuth }) {
+export default function AuthScreen({ prepareAuth, cancelAuth }) {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -146,9 +146,7 @@ export default function AuthScreen({ prepareAuth }) {
       if (hydratePromise) await hydratePromise;
     } catch (err) {
       setError(friendlyAuthError(err));
-      if (prepareAuth) {
-        await new Promise((resolve) => setTimeout(resolve, 0));
-      }
+      cancelAuth?.();
     } finally {
       setBusy(false);
     }
