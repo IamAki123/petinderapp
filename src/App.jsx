@@ -1039,16 +1039,11 @@ export default function App() {
   };
 
   const handleAuthSuccess = useCallback(async (firebaseUser) => {
-    setAuthLoading(true);
-    try {
-      await hydrateUser({
-        uid: firebaseUser.uid,
-        email: firebaseUser.email || "",
-        mode: "firebase",
-      });
-    } finally {
-      setAuthLoading(false);
-    }
+    await hydrateUser({
+      uid: firebaseUser.uid,
+      email: firebaseUser.email || "",
+      mode: "firebase",
+    });
   }, []);
 
   const reloadPets = useCallback(async () => {
@@ -1076,22 +1071,34 @@ export default function App() {
     }
 
     const auth = getFirebaseAuth();
-    const unsub = onAuthStateChanged(auth, async (firebaseUser) => {
-      try {
-        if (!firebaseUser) {
-          setUser(null);
-          resetAppState();
-          return;
-        }
-        await hydrateUser({ uid: firebaseUser.uid, email: firebaseUser.email || "", mode: "firebase" });
-      } catch (e) {
-        console.error("Auth hydrate failed:", e);
-      } finally {
-        setAuthLoading(false);
+    if (!auth) {
+      setAuthLoading(false);
+      return undefined;
+    }
+
+    const timeout = setTimeout(() => setAuthLoading(false), 8000);
+
+    const unsub = onAuthStateChanged(auth, (firebaseUser) => {
+      clearTimeout(timeout);
+      setAuthLoading(false);
+
+      if (!firebaseUser) {
+        setUser(null);
+        resetAppState();
+        return;
       }
+
+      hydrateUser({
+        uid: firebaseUser.uid,
+        email: firebaseUser.email || "",
+        mode: "firebase",
+      }).catch((e) => console.error("Auth hydrate failed:", e));
     });
 
-    return unsub;
+    return () => {
+      clearTimeout(timeout);
+      unsub();
+    };
   }, []);
 
   useEffect(() => {
