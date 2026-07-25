@@ -5,7 +5,6 @@ import {
   signInWithEmailAndPassword,
 } from "firebase/auth";
 import { getFirebaseAuth, isFirebaseConfigured } from "../firebase.js";
-import { loadAccount, saveAccount, saveSession } from "../storage.js";
 import { saveUserData } from "../userData.js";
 
 function friendlyAuthError(code) {
@@ -19,6 +18,29 @@ function friendlyAuthError(code) {
     "auth/too-many-requests": "Too many attempts. Wait a moment and try again.",
   };
   return map[code] || "Something went wrong. Please try again.";
+}
+
+function FirebaseSetupScreen() {
+  return (
+    <div className="pt-root min-h-full flex flex-col items-center justify-center px-6 py-10">
+      <PawPrint size={44} color="var(--pine)" className="mb-3" />
+      <h1 className="pt-display text-2xl mb-2" style={{ color: "var(--pine)" }}>Firebase required</h1>
+      <p className="text-sm text-center max-w-sm mb-4" style={{ color: "var(--ink)", opacity: 0.75 }}>
+        Accounts, pet listings, and messages sync through Firebase so you can log in on any device.
+      </p>
+      <div className="text-xs text-left max-w-sm rounded-xl p-4" style={{ background: "var(--paper-dark)" }}>
+        <p className="mb-2 font-bold">Add to <code>.env</code> (local) or Vercel env vars:</p>
+        <p className="font-mono text-[10px] leading-relaxed opacity-80">
+          VITE_FIREBASE_API_KEY<br />
+          VITE_FIREBASE_AUTH_DOMAIN<br />
+          VITE_FIREBASE_PROJECT_ID<br />
+          VITE_FIREBASE_STORAGE_BUCKET<br />
+          VITE_FIREBASE_MESSAGING_SENDER_ID<br />
+          VITE_FIREBASE_APP_ID
+        </p>
+      </div>
+    </div>
+  );
 }
 
 function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterName }) {
@@ -56,181 +78,7 @@ function ShelterSignupFields({ isShelter, setIsShelter, shelterName, setShelterN
   );
 }
 
-function LocalAuthScreen({ onAuthSuccess }) {
-  const [mode, setMode] = useState("login");
-  const [username, setUsername] = useState("");
-  const [passcode, setPasscode] = useState("");
-  const [confirm, setConfirm] = useState("");
-  const [isShelter, setIsShelter] = useState(false);
-  const [shelterName, setShelterName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState("");
-
-  const submit = async () => {
-    setError("");
-    const trimmed = username.trim();
-    if (!trimmed || !passcode) {
-      setError("Enter a username and passcode.");
-      return;
-    }
-    if (mode === "signup") {
-      if (passcode.length < 4) {
-        setError("Passcode must be at least 4 characters.");
-        return;
-      }
-      if (passcode !== confirm) {
-        setError("Passcodes do not match.");
-        return;
-      }
-      if (isShelter && !shelterName.trim()) {
-        setError("Enter your shelter name.");
-        return;
-      }
-    }
-
-    setBusy(true);
-    try {
-      const existing = await loadAccount(trimmed);
-      if (mode === "login") {
-        if (!existing || existing.passcode !== passcode) {
-          setError("Wrong username or passcode.");
-          return;
-        }
-        saveSession(trimmed);
-        onAuthSuccess({
-          uid: trimmed.toLowerCase(),
-          username: trimmed,
-          mode: "local",
-          accountType: existing.accountType || "adopter",
-          shelterName: existing.shelterName || "",
-        });
-        return;
-      }
-
-      if (existing) {
-        setError("That username is already taken. Try logging in.");
-        return;
-      }
-
-      const accountType = isShelter ? "shelter" : "adopter";
-      await saveAccount(trimmed, {
-        passcode,
-        accountType,
-        shelterName: isShelter ? shelterName.trim() : "",
-      });
-
-      saveSession(trimmed);
-      onAuthSuccess({
-        uid: trimmed.toLowerCase(),
-        username: trimmed,
-        mode: "local",
-        accountType,
-        shelterName: isShelter ? shelterName.trim() : "",
-      });
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  return (
-    <div className="pt-root min-h-full flex flex-col items-center justify-center px-6 py-10">
-      <div className="pt-float mb-2"><PawPrint size={44} color="var(--pine)" /></div>
-      <h1 className="pt-display text-3xl mb-1" style={{ color: "var(--pine)" }}>Petinder</h1>
-      <p className="pt-stamp text-xs mb-2" style={{ color: "var(--brick)" }}>a shelter kennel-card matchmaker</p>
-      <p className="text-xs mb-8 text-center max-w-sm" style={{ color: "var(--ink)", opacity: 0.6 }}>
-        Saved on this device. Add Firebase keys to .env for cloud sync across devices.
-      </p>
-
-      <div className="w-full max-w-sm pt-card-shadow rounded-2xl p-6" style={{ background: "white" }}>
-        <div className="flex rounded-xl mb-5 overflow-hidden" style={{ border: "2px solid var(--pine)" }}>
-          {["login", "signup"].map((m) => (
-            <button
-              key={m}
-              onClick={() => { setMode(m); setError(""); }}
-              className="flex-1 py-2 pt-stamp text-xs"
-              style={{
-                background: mode === m ? "var(--pine)" : "var(--paper)",
-                color: mode === m ? "var(--paper)" : "var(--pine)",
-                border: "none",
-                cursor: "pointer",
-              }}
-            >
-              {m === "login" ? "Log in" : "Sign up"}
-            </button>
-          ))}
-        </div>
-
-        <h2 className="pt-display text-xl mb-1" style={{ color: "var(--ink)" }}>
-          {mode === "login" ? "Welcome back" : "Create your account"}
-        </h2>
-        <p className="text-xs mb-4" style={{ color: "var(--ink)", opacity: 0.65 }}>
-          {mode === "login"
-            ? "Enter the username and passcode you saved on this device."
-            : "Pick a username and passcode — adopters swipe, shelters publish pets."}
-        </p>
-
-        <label className="pt-stamp text-xs block mb-1">Username</label>
-        <input
-          type="text"
-          autoComplete="username"
-          value={username}
-          onChange={(e) => setUsername(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="e.g. alex"
-          className="w-full px-4 py-3 rounded-xl mb-3"
-          style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
-        />
-
-        <label className="pt-stamp text-xs block mb-1">Passcode</label>
-        <input
-          type="password"
-          autoComplete={mode === "signup" ? "new-password" : "current-password"}
-          value={passcode}
-          onChange={(e) => setPasscode(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && submit()}
-          placeholder="at least 4 characters"
-          className="w-full px-4 py-3 rounded-xl mb-3"
-          style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
-        />
-
-        {mode === "signup" && (
-          <>
-            <label className="pt-stamp text-xs block mb-1">Confirm passcode</label>
-            <input
-              type="password"
-              autoComplete="new-password"
-              value={confirm}
-              onChange={(e) => setConfirm(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && submit()}
-              placeholder="repeat passcode"
-              className="w-full px-4 py-3 rounded-xl mb-3"
-              style={{ border: "2px solid var(--pine)", background: "var(--paper)" }}
-            />
-            <ShelterSignupFields
-              isShelter={isShelter}
-              setIsShelter={setIsShelter}
-              shelterName={shelterName}
-              setShelterName={setShelterName}
-            />
-          </>
-        )}
-
-        {error && <p className="text-xs mb-2" style={{ color: "var(--brick)" }}>{error}</p>}
-
-        <button
-          onClick={submit}
-          disabled={busy}
-          className="pt-display w-full mt-3 py-3 rounded-xl text-white"
-          style={{ background: "var(--pine)", border: "none", cursor: busy ? "wait" : "pointer" }}
-        >
-          {busy ? "Please wait…" : mode === "login" ? "Log in" : "Create account"}
-        </button>
-      </div>
-    </div>
-  );
-}
-
-function FirebaseAuthScreen() {
+export default function AuthScreen() {
   const [mode, setMode] = useState("login");
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -239,6 +87,10 @@ function FirebaseAuthScreen() {
   const [shelterName, setShelterName] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
+
+  if (!isFirebaseConfigured()) {
+    return <FirebaseSetupScreen />;
+  }
 
   const submit = async () => {
     setError("");
@@ -312,7 +164,7 @@ function FirebaseAuthScreen() {
         </h2>
         <p className="text-xs mb-4" style={{ color: "var(--ink)", opacity: 0.65 }}>
           {mode === "login"
-            ? "Log in to sync matches, visits, and chats across devices."
+            ? "Same email works on your phone, computer, and anywhere else."
             : "Adopters swipe pets. Shelters publish listings for everyone to see."}
         </p>
 
@@ -375,11 +227,4 @@ function FirebaseAuthScreen() {
       </div>
     </div>
   );
-}
-
-export default function AuthScreen({ onLocalAuth }) {
-  if (isFirebaseConfigured()) {
-    return <FirebaseAuthScreen />;
-  }
-  return <LocalAuthScreen onAuthSuccess={onLocalAuth} />;
 }

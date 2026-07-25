@@ -12,5 +12,16 @@ service cloud.firestore {
       allow update, delete: if request.auth != null
         && resource.data.shelterUid == request.auth.uid;
     }
+
+    match /messages/{messageId} {
+      allow read: if request.auth != null
+        && resource.data.shelterUid == request.auth.uid;
+      allow create: if request.auth != null
+        && request.resource.data.adopterUid == request.auth.uid
+        && request.resource.data.shelterUid is string
+        && request.resource.data.type == 'appointment';
+      allow update: if request.auth != null
+        && resource.data.shelterUid == request.auth.uid;
+    }
   }
 }

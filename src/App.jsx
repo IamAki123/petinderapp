@@ -1,17 +1,18 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import {
   Heart, X, PawPrint, Calendar, User, RotateCcw,
-  MapPin, Sparkles, Clock, Trash2, ChevronRight, MessageCircle, Navigation, LogOut, ClipboardList
+  MapPin, Sparkles, Clock, Trash2, ChevronRight, MessageCircle, Navigation, LogOut, ClipboardList, Mail
 } from "lucide-react";
 import { loadUserData, saveUserData, deleteUserData } from "./userData.js";
-import { clearSession, loadSession } from "./storage.js";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase.js";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import AuthScreen from "./components/AuthScreen.jsx";
 import ShelterListingsScreen from "./components/ShelterListingsScreen.jsx";
+import ShelterMessagesScreen from "./components/ShelterMessagesScreen.jsx";
 import { createChatSession, normalizeChatSessions } from "./utils/chat.js";
 import { mergePetLists, withPhotoUrls } from "./utils/pets.js";
 import { loadPublicPets } from "./publicPets.js";
+import { notifyShelterOfAppointment, subscribeShelterMessages, markAllMessagesRead } from "./messages.js";
 import {
   todayLocalISO, availableTimeSlots, formatTime12, isTimeAvailable,
 } from "./utils/booking.js";
@@ -155,10 +156,11 @@ function TagChip({ children }) {
   );
 }
 
-function BottomNav({ screen, setScreen, matchCount, apptCount, isShelter }) {
+function BottomNav({ screen, setScreen, matchCount, apptCount, isShelter, messageCount }) {
   const items = isShelter
     ? [
         { key: "listings", label: "Listings", icon: ClipboardList },
+        { key: "messages", label: "Inbox", icon: Mail, badge: messageCount },
         { key: "map", label: "Map", icon: MapPin },
         { key: "profile", label: "Profile", icon: User },
       ]
@@ -968,6 +970,7 @@ export default function App() {
   const [screen, setScreen] = useState("swipe");
   const [booking, setBooking] = useState(null);
   const [syncNote, setSyncNote] = useState("");
+  const [shelterMessages, setShelterMessages] = useState([]);
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
@@ -1044,17 +1047,7 @@ export default function App() {
 
   useEffect(() => {
     if (!isFirebaseConfigured()) {
-      (async () => {
-        const session = loadSession();
-        if (session?.username) {
-          await hydrateUser({
-            uid: session.username.trim().toLowerCase(),
-            username: session.username.trim(),
-            mode: "local",
-          });
-        }
-        setAuthLoading(false);
-      })();
+      setAuthLoading(false);
       return undefined;
     }
 
@@ -1073,6 +1066,21 @@ export default function App() {
 
     return unsub;
   }, []);
+
+  useEffect(() => {
+    if (!user || user.accountType !== "shelter") {
+      setShelterMessages([]);
+      return undefined;
+    }
+    return subscribeShelterMessages(user.uid, setShelterMessages);
+  }, [user?.uid, user?.accountType]);
+
+  useEffect(() => {
+    if (screen !== "messages" || !user || user.accountType !== "shelter") return;
+    if (shelterMessages.some((m) => !m.read)) {
+      markAllMessagesRead(user.uid, shelterMessages).catch(console.error);
+    }
+  }, [screen, shelterMessages, user]);
 
   useEffect(() => {
     reloadPets();
@@ -1149,47 +1157,50 @@ export default function App() {
     }
   };
   const handleBookConfirm = async (date, time) => {
-    const coords = await resolveShelterCoords(booking.location);
+    const pet = booking;
+    const coords = await resolveShelterCoords(pet.location);
     setAppointments((a) => [...a, {
-      pet: booking,
+      pet,
       date,
       time,
       shelterLat: coords?.lat ?? null,
       shelterLng: coords?.lng ?? null,
     }]);
+
+    if (pet.shelterUid && user?.uid) {
+      try {
+        await notifyShelterOfAppointment({
+          shelterUid: pet.shelterUid,
+          adopterUid: user.uid,
+          adopterName: profile?.name || user.email || "An adopter",
+          adopterEmail: user.email || "",
+          pet,
+          date,
+          time,
+        });
+        setSyncNote(`Visit booked! ${pet.shelterName || "The shelter"} has been notified.`);
+      } catch (e) {
+        console.error(e);
+        setSyncNote(`Visit booked at ${pet.location}. (Shelter notification failed — check Firebase.)`);
+      }
+    } else {
+      setSyncNote(`Visit booked at ${pet.location}. Tap the card for directions.`);
+    }
+
     setBooking(null);
     setScreen("appointments");
-    setSyncNote(`Visit booked at ${booking.location}. Tap the card for directions.`);
     setTimeout(() => setSyncNote(""), 4000);
   };
 
   const handleLogout = async () => {
-    if (user?.mode === "local") {
-      clearSession();
-      setUser(null);
-      resetAppState();
-      return;
-    }
     const auth = getFirebaseAuth();
     if (auth) await signOut(auth);
   };
 
   const handleWipe = async () => {
     if (user) await deleteUserData(user.uid);
-    if (user?.mode === "local") {
-      clearSession();
-      setUser(null);
-      resetAppState();
-      return;
-    }
     const auth = getFirebaseAuth();
     if (auth) await signOut(auth);
-  };
-
-  const handleLocalAuth = async (nextUser) => {
-    setAuthLoading(true);
-    await hydrateUser(nextUser);
-    setAuthLoading(false);
   };
 
   if (authLoading) {
@@ -1206,7 +1217,7 @@ export default function App() {
     return (
       <div className="pt-root h-full min-h-[640px]">
         <GlobalStyle />
-        <AuthScreen onLocalAuth={handleLocalAuth} />
+        <AuthScreen />
       </div>
     );
   }
@@ -1231,6 +1242,7 @@ export default function App() {
   }
 
   const isShelter = user.accountType === "shelter" || profile.role === "shelter";
+  const unreadMessages = shelterMessages.filter((m) => !m.read).length;
 
   return (
     <div className="pt-root h-full min-h-[640px] flex flex-col" style={{ maxWidth: 420, margin: "0 auto" }}>
@@ -1260,6 +1272,8 @@ export default function App() {
           </div>
         ) : screen === "listings" ? (
           <ShelterListingsScreen user={user} profile={profile} onPetsUpdated={reloadPets} />
+        ) : screen === "messages" ? (
+          <ShelterMessagesScreen messages={shelterMessages} />
         ) : screen === "swipe" ? (
           <SwipeScreen
             profile={profile}
@@ -1288,8 +1302,8 @@ export default function App() {
           <ProfileScreen
             profile={profile} weights={weights} history={history} matches={matches} appointments={appointments}
             onReset={handleWipe} onLogout={handleLogout}
-            displayName={user.username || user.email}
-            syncLabel={user.mode === "local" ? "saved on this device" : "synced to cloud"}
+            displayName={user.email || user.username}
+            syncLabel="synced to cloud"
           />
         )}
       </div>
@@ -1300,6 +1314,7 @@ export default function App() {
         matchCount={matches.length}
         apptCount={appointments.length}
         isShelter={isShelter}
+        messageCount={unreadMessages}
       />
 
       {booking && <BookingModal pet={booking} onClose={() => setBooking(null)} onConfirm={handleBookConfirm} />}
