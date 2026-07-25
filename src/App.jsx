@@ -1071,6 +1071,15 @@ export default function App() {
   }, []);
 
   useEffect(() => {
+    if (!user || profileReady) return undefined;
+    const timer = setTimeout(() => {
+      console.warn("Profile load safety timeout — continuing without cloud profile");
+      setProfileReady(true);
+    }, 9000);
+    return () => clearTimeout(timer);
+  }, [user, profileReady]);
+
+  useEffect(() => {
     if (!isFirebaseConfigured()) {
       setAuthLoading(false);
       return undefined;

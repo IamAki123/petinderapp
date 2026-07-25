@@ -1,12 +1,25 @@
 import { doc, getDoc, setDoc, deleteDoc } from "firebase/firestore";
 import { getFirestoreDb, isFirebaseConfigured } from "./firebase.js";
 
+function withTimeout(promise, ms, label = "Request") {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => {
+      setTimeout(() => reject(new Error(`${label} timed out after ${ms}ms`)), ms);
+    }),
+  ]);
+}
+
 export async function loadUserData(uid) {
   if (!isFirebaseConfigured()) return null;
   const db = getFirestoreDb();
   if (!db) return null;
   try {
-    const snap = await getDoc(doc(db, "users", uid));
+    const snap = await withTimeout(
+      getDoc(doc(db, "users", uid)),
+      8000,
+      "Firestore profile load"
+    );
     return snap.exists() ? snap.data() : null;
   } catch (e) {
     console.error("Failed to load user data:", e);
@@ -19,10 +32,14 @@ export async function saveUserData(uid, record) {
   const db = getFirestoreDb();
   if (!db) return false;
   try {
-    await setDoc(
-      doc(db, "users", uid),
-      { ...record, updatedAt: Date.now() },
-      { merge: true }
+    await withTimeout(
+      setDoc(
+        doc(db, "users", uid),
+        { ...record, updatedAt: Date.now() },
+        { merge: true }
+      ),
+      8000,
+      "Firestore profile save"
     );
     return true;
   } catch (e) {
