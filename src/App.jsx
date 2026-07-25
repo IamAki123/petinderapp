@@ -56,21 +56,24 @@ function fallbackPhotoUrl(pet) {
   return `https://picsum.photos/seed/${pet.id}-fallback/500/650`;
 }
 
-function SignOutButton({ onClick, compact = false }) {
+function SignOutButton({ onClick, compact = false, disabled = false, label = "Sign out" }) {
   return (
     <button
+      type="button"
       onClick={onClick}
+      disabled={disabled}
       className={`flex items-center gap-1 pt-stamp rounded-lg ${compact ? "text-xs px-2 py-1" : "text-xs px-3 py-2"}`}
       style={{
         border: "1.5px solid var(--pine)",
         color: "var(--pine)",
         background: "transparent",
-        cursor: "pointer",
+        cursor: disabled ? "wait" : "pointer",
+        opacity: disabled ? 0.6 : 1,
       }}
-      title="Sign out"
+      title={label}
     >
       <LogOut size={14} />
-      Sign out
+      {label}
     </button>
   );
 }
@@ -896,7 +899,7 @@ function AppointmentsScreen({ appointments, onCancel }) {
 /* PROFILE SCREEN                                                          */
 /* ---------------------------------------------------------------------- */
 
-function ProfileScreen({ profile, weights, history, matches, appointments, onReset, onLogout, displayName, syncLabel }) {
+function ProfileScreen({ profile, weights, history, matches, appointments, onReset, onLogout, displayName, syncLabel, loggingOut }) {
   const top = Object.entries(weights).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 6);
   const maxW = top.length ? top[0][1] : 1;
   return (
@@ -911,7 +914,15 @@ function ProfileScreen({ profile, weights, history, matches, appointments, onRes
 
       <div className="rounded-xl px-3 py-2 mb-5 flex items-center justify-between" style={{ background: "var(--paper-dark)" }}>
         <span className="pt-stamp text-xs" style={{ color: "var(--pine)" }}>Signed in as {displayName} · {syncLabel}</span>
-        <button onClick={onLogout} className="pt-stamp text-xs underline" style={{ color: "var(--pine)", background: "none", border: "none", cursor: "pointer" }}>Sign out</button>
+        <button
+          type="button"
+          onClick={onLogout}
+          disabled={loggingOut}
+          className="pt-stamp text-xs underline"
+          style={{ color: "var(--pine)", background: "none", border: "none", cursor: loggingOut ? "wait" : "pointer", opacity: loggingOut ? 0.6 : 1 }}
+        >
+          {loggingOut ? "Signing out…" : "Sign out"}
+        </button>
       </div>
 
       <div className="grid grid-cols-3 gap-2 mb-6">
@@ -971,6 +982,7 @@ export default function App() {
   const [screen, setScreen] = useState("swipe");
   const [booking, setBooking] = useState(null);
   const [syncNote, setSyncNote] = useState("");
+  const [loggingOut, setLoggingOut] = useState(false);
   const [shelterMessages, setShelterMessages] = useState([]);
   const [profileReady, setProfileReady] = useState(false);
   const [needsProfileSetup, setNeedsProfileSetup] = useState(false);
@@ -980,6 +992,7 @@ export default function App() {
   const hydrating = useRef(false);
   const saveTimer = useRef(null);
   const queueInitialized = useRef(false);
+  const loggingOutRef = useRef(false);
 
   const resetAppState = () => {
     queueInitialized.current = false;
@@ -1245,13 +1258,42 @@ export default function App() {
     ...extra,
   });
 
-  const flushUserSave = async () => {
-    if (!user || !profile) return true;
+  const flushUserSave = async (timeoutMs = 2000) => {
+    if (!user || !profile) return;
     if (saveTimer.current) {
       clearTimeout(saveTimer.current);
       saveTimer.current = null;
     }
-    return saveUserData(user.uid, buildUserRecord());
+    try {
+      await Promise.race([
+        saveUserData(user.uid, buildUserRecord()),
+        new Promise((resolve) => { setTimeout(resolve, timeoutMs); }),
+      ]);
+    } catch (e) {
+      console.warn("Could not flush save before sign out:", e);
+    }
+  };
+
+  const handleLogout = async () => {
+    if (loggingOutRef.current) return;
+    loggingOutRef.current = true;
+    setLoggingOut(true);
+
+    await flushUserSave(2000);
+
+    try {
+      const auth = getFirebaseAuth();
+      if (auth) await signOut(auth);
+    } catch (e) {
+      console.error("Sign out failed:", e);
+      setSyncNote("Could not sign out. Try refreshing the page.");
+      setTimeout(() => setSyncNote(""), 4000);
+    } finally {
+      setUser(null);
+      resetAppState();
+      loggingOutRef.current = false;
+      setLoggingOut(false);
+    }
   };
 
   const handleOnboardingDone = async (newProfile) => {
@@ -1362,12 +1404,6 @@ export default function App() {
     setTimeout(() => setSyncNote(""), 4000);
   };
 
-  const handleLogout = async () => {
-    await flushUserSave();
-    const auth = getFirebaseAuth();
-    if (auth) await signOut(auth);
-  };
-
   const handleWipe = async () => {
     if (user) await deleteUserData(user.uid);
     const auth = getFirebaseAuth();
@@ -1409,7 +1445,7 @@ export default function App() {
       <div className="pt-root h-full min-h-[640px] flex flex-col">
         <GlobalStyle />
         <div className="flex justify-end px-5 pt-4">
-          <SignOutButton onClick={handleLogout} />
+          <SignOutButton onClick={handleLogout} disabled={loggingOut} label={loggingOut ? "Signing out…" : "Sign out"} />
         </div>
         <div className="flex-1 min-h-0">
           {isShelter ? (
@@ -1445,7 +1481,7 @@ export default function App() {
         </div>
         <div className="flex items-center gap-2 shrink-0">
           <span className="pt-stamp text-xs hidden sm:inline" style={{ color: "var(--brick)" }}>hi, {profile.name}</span>
-          <SignOutButton onClick={handleLogout} compact />
+          <SignOutButton onClick={handleLogout} compact disabled={loggingOut} label={loggingOut ? "…" : "Sign out"} />
         </div>
       </div>
 
@@ -1495,6 +1531,7 @@ export default function App() {
             onReset={handleWipe} onLogout={handleLogout}
             displayName={user.email || user.username}
             syncLabel="synced to cloud"
+            loggingOut={loggingOut}
           />
         )}
       </div>
