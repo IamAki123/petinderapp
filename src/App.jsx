@@ -3,7 +3,7 @@ import {
   Heart, X, PawPrint, Calendar, User, RotateCcw,
   MapPin, Sparkles, Clock, Trash2, ChevronRight, MessageCircle, Navigation, LogOut, ClipboardList, Mail
 } from "lucide-react";
-import { loadUserData, saveUserData, deleteUserData } from "./userData.js";
+import { loadUserData, saveUserData, deleteUserData, saveErrorMessage } from "./userData.js";
 import { getFirebaseAuth, isFirebaseConfigured } from "./firebase.js";
 import { onAuthStateChanged, signOut } from "firebase/auth";
 import AuthScreen from "./components/AuthScreen.jsx";
@@ -1012,6 +1012,19 @@ export default function App() {
     setSyncNote("");
   };
 
+  const applyGameState = (saved, profileForChat) => {
+    if (!saved) return;
+    if (saved.weights && Object.keys(saved.weights).length > 0) setWeights(saved.weights);
+    if (Array.isArray(saved.history) && saved.history.length > 0) setHistory(saved.history);
+    if (Array.isArray(saved.matches) && saved.matches.length > 0) setMatches(saved.matches);
+    if (Array.isArray(saved.appointments) && saved.appointments.length > 0) setAppointments(saved.appointments);
+    if (profileForChat && Array.isArray(saved.chatSessions) && saved.chatSessions.length > 0) {
+      const sessions = normalizeChatSessions(saved.chatSessions, profileForChat);
+      setChatSessions(sessions);
+      setActiveChatId(saved.activeChatId || sessions[0]?.id || null);
+    }
+  };
+
   const applySavedData = (saved, accountType) => {
     if (saved?.profile) {
       setProfile(saved.profile);
@@ -1101,8 +1114,13 @@ export default function App() {
           ? defaultShelterProfile(nextUser.email, shelterName)
           : defaultAdopterProfile(nextUser.email);
         initFreshSession(fallbackProfile, accountType);
+        applyGameState(saved, fallbackProfile);
         hydratedUidRef.current = nextUser.uid;
-        setSyncNote("No saved preferences yet — showing all pets.");
+        if (saved?.matches?.length) {
+          setSyncNote(`Welcome back! Restored ${saved.matches.length} match${saved.matches.length === 1 ? "" : "es"}.`);
+        } else {
+          setSyncNote("No saved preferences yet — showing all pets.");
+        }
         setTimeout(() => setSyncNote(""), 3000);
       }
     } catch (e) {
@@ -1258,6 +1276,25 @@ export default function App() {
     ...extra,
   });
 
+  const showSyncError = (result) => {
+    setSyncNote(saveErrorMessage(result));
+    setTimeout(() => setSyncNote(""), 6000);
+  };
+
+  const persistToCloud = async (overrides = {}, { quiet = false } = {}) => {
+    if (!user?.uid || !profile || needsProfileSetup) return { ok: false };
+    if (saveTimer.current) {
+      clearTimeout(saveTimer.current);
+      saveTimer.current = null;
+    }
+    const result = await saveUserData(user.uid, buildUserRecord({
+      profileSetupComplete: true,
+      ...overrides,
+    }));
+    if (!result.ok && !quiet) showSyncError(result);
+    return result;
+  };
+
   const flushUserSave = async (timeoutMs = 2000) => {
     if (!user || !profile) return;
     if (saveTimer.current) {
@@ -1266,7 +1303,7 @@ export default function App() {
     }
     try {
       await Promise.race([
-        saveUserData(user.uid, buildUserRecord()),
+        persistToCloud({}, { quiet: true }),
         new Promise((resolve) => { setTimeout(resolve, timeoutMs); }),
       ]);
     } catch (e) {
@@ -1306,15 +1343,14 @@ export default function App() {
     setChatSessions([firstChat]);
     setActiveChatId(firstChat.id);
     if (user) {
-      const saved = await saveUserData(user.uid, buildUserRecord({
+      const result = await saveUserData(user.uid, buildUserRecord({
         profileSetupComplete: true,
         profile: newProfile,
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [firstChat], activeChatId: firstChat.id,
       }));
-      if (!saved) {
-        setSyncNote("Could not save your profile. Publish Firestore rules in Firebase console.");
-        setTimeout(() => setSyncNote(""), 6000);
+      if (!result.ok) {
+        showSyncError(result);
       } else {
         setSyncNote("Profile saved!");
         setTimeout(() => setSyncNote(""), 2500);
@@ -1330,7 +1366,7 @@ export default function App() {
     setProfile(newProfile);
     setScreen("listings");
     if (user) {
-      const saved = await saveUserData(user.uid, buildUserRecord({
+      const result = await saveUserData(user.uid, buildUserRecord({
         profileSetupComplete: true,
         accountType: "shelter",
         shelterName: newProfile.shelterName,
@@ -1338,9 +1374,8 @@ export default function App() {
         weights: {}, history: [], matches: [], appointments: [],
         chatSessions: [], activeChatId: null,
       }));
-      if (!saved) {
-        setSyncNote("Could not save your shelter profile. Publish Firestore rules in Firebase console.");
-        setTimeout(() => setSyncNote(""), 6000);
+      if (!result.ok) {
+        showSyncError(result);
       } else {
         setSyncNote("Shelter profile saved!");
         setTimeout(() => setSyncNote(""), 2500);
@@ -1354,14 +1389,26 @@ export default function App() {
     if (!profile.name) return;
     if (saveTimer.current) clearTimeout(saveTimer.current);
     saveTimer.current = setTimeout(() => {
-      saveUserData(user.uid, buildUserRecord({ profileSetupComplete: true }));
+      persistToCloud({}, { quiet: true });
     }, 2500);
     return () => clearTimeout(saveTimer.current);
   }, [profile, weights, history, matches, appointments, user, needsProfileSetup]);
 
-  const handleMatch = (pet) => setMatches((m) => (m.some((p) => p.id === pet.id) ? m : [...m, pet]));
+  const handleMatch = (pet) => {
+    setMatches((current) => {
+      if (current.some((entry) => entry.id === pet.id)) return current;
+      const next = [...current, pet];
+      persistToCloud({ matches: next });
+      return next;
+    });
+  };
+
   const handleRemoveMatch = (petId) => {
-    setMatches((m) => m.filter((p) => p.id !== petId));
+    setMatches((current) => {
+      const next = current.filter((entry) => entry.id !== petId);
+      persistToCloud({ matches: next });
+      return next;
+    });
     setAppointments((a) => a.filter((appt) => appt.pet.id !== petId));
     const pet = pets.find((p) => p.id === petId);
     if (pet) {
@@ -1371,13 +1418,17 @@ export default function App() {
   const handleBookConfirm = async (date, time) => {
     const pet = booking;
     const coords = await resolveShelterCoords(pet.location);
-    setAppointments((a) => [...a, {
-      pet,
-      date,
-      time,
-      shelterLat: coords?.lat ?? null,
-      shelterLng: coords?.lng ?? null,
-    }]);
+    setAppointments((a) => {
+      const next = [...a, {
+        pet,
+        date,
+        time,
+        shelterLat: coords?.lat ?? null,
+        shelterLng: coords?.lng ?? null,
+      }];
+      persistToCloud({ appointments: next });
+      return next;
+    });
 
     if (pet.shelterUid && user?.uid) {
       try {

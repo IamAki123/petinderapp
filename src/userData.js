@@ -15,36 +15,60 @@ async function ensureAuthToken() {
   const current = auth?.currentUser;
   if (!current) return;
   try {
-    await current.getIdToken();
+    await current.getIdToken(true);
   } catch {
-    // Ignore token refresh errors; Firestore may still accept the session.
+    try {
+      await current.getIdToken();
+    } catch {
+      // Firestore may still accept the existing session.
+    }
   }
+}
+
+export function sanitizeForFirestore(value) {
+  if (value === undefined) return undefined;
+  if (value === null) return null;
+  if (Array.isArray(value)) {
+    return value
+      .map((entry) => sanitizeForFirestore(entry))
+      .filter((entry) => entry !== undefined);
+  }
+  if (typeof value === "object") {
+    const out = {};
+    for (const [key, entry] of Object.entries(value)) {
+      if (entry === undefined) continue;
+      const cleaned = sanitizeForFirestore(entry);
+      if (cleaned !== undefined) out[key] = cleaned;
+    }
+    return out;
+  }
+  return value;
 }
 
 function slimPet(pet) {
   if (!pet?.id) return null;
-  return {
+  return sanitizeForFirestore({
     id: pet.id,
-    name: pet.name,
-    species: pet.species,
-    breed: pet.breed,
-    age: pet.age,
-    temperament: pet.temperament,
-    energyLevel: pet.energyLevel,
-    size: pet.size,
-    bio: pet.bio,
-    location: pet.location,
-    shelterName: pet.shelterName,
-    shelterUid: pet.shelterUid,
-    photoUrl: pet.photoUrl,
-  };
+    name: pet.name || "",
+    species: pet.species || "",
+    breed: pet.breed || "",
+    age: pet.age || "",
+    temperament: pet.temperament || "",
+    energyLevel: pet.energyLevel || "",
+    size: pet.size || "",
+    bio: pet.bio || "",
+    location: pet.location || "",
+    shelterName: pet.shelterName || "",
+    shelterUid: pet.shelterUid || "",
+    photoUrl: pet.photoUrl || "",
+  });
 }
 
 export function slimUserRecord(record) {
-  return {
+  return sanitizeForFirestore({
     email: record.email || "",
     uid: record.uid,
-    accountType: record.accountType,
+    accountType: record.accountType || "adopter",
     shelterName: record.shelterName || "",
     profileSetupComplete: Boolean(record.profileSetupComplete),
     profile: record.profile || null,
@@ -65,14 +89,26 @@ export function slimUserRecord(record) {
     chatSessions: Array.isArray(record.chatSessions)
       ? record.chatSessions.slice(0, 5).map((session) => ({
         id: session.id,
-        title: session.title,
-        updatedAt: session.updatedAt,
+        title: session.title || "New chat",
+        updatedAt: session.updatedAt || Date.now(),
         messages: Array.isArray(session.messages) ? session.messages.slice(-25) : [],
       }))
       : [],
     activeChatId: record.activeChatId ?? null,
     updatedAt: Date.now(),
-  };
+  });
+}
+
+export function saveErrorMessage(result) {
+  const code = result?.code || "";
+  const message = result?.message || "";
+  if (code === "permission-denied" || message.toLowerCase().includes("permission")) {
+    return "Cloud save blocked. In Firebase console go to Firestore → Rules → Publish the rules below.";
+  }
+  if (message.toLowerCase().includes("timed out")) {
+    return "Cloud save timed out. Check your connection and try again.";
+  }
+  return "Could not sync to the cloud. Check Firebase setup and try again.";
 }
 
 export async function loadUserData(uid) {
@@ -103,9 +139,13 @@ export async function loadUserData(uid) {
 }
 
 export async function saveUserData(uid, record) {
-  if (!isFirebaseConfigured()) return false;
+  if (!isFirebaseConfigured()) {
+    return { ok: false, code: "not-configured", message: "Firebase is not configured" };
+  }
   const db = getFirestoreDb();
-  if (!db) return false;
+  if (!db) {
+    return { ok: false, code: "no-db", message: "Could not connect to Firestore" };
+  }
 
   await ensureAuthToken();
   const payload = slimUserRecord({ ...record, uid });
@@ -117,17 +157,21 @@ export async function saveUserData(uid, record) {
         15000,
         "Firestore profile save"
       );
-      return true;
+      return { ok: true };
     } catch (e) {
       console.error(`Failed to save user data (attempt ${attempt + 1}):`, e);
       if (attempt === 0) {
         await new Promise((resolve) => setTimeout(resolve, 400));
         continue;
       }
-      return false;
+      return {
+        ok: false,
+        code: e.code || "save-failed",
+        message: e.message || "Save failed",
+      };
     }
   }
-  return false;
+  return { ok: false, code: "save-failed", message: "Save failed" };
 }
 
 export async function deleteUserData(uid) {
